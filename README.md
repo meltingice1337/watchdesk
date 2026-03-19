@@ -34,7 +34,7 @@ cargo build --release
 
 ### Configure
 
-Create a `config.toml` next to the executable (or in the working directory):
+Create a `config.toml` in your project root (or working directory):
 
 ```toml
 [mqtt]
@@ -55,7 +55,7 @@ The `name` field is used as the device name in Home Assistant. It gets slugified
 watchdesk.exe install
 ```
 
-This will trigger a UAC prompt, install the service with auto-start, and start it immediately. The service will automatically start on boot.
+This will copy `config.toml` from the current directory to `C:\ProgramData\WatchDesk\`, trigger a UAC prompt, install the service with auto-start, and start it immediately. The service reads its config from ProgramData, so you only need to maintain the one in your project root. Re-run install to update the config.
 
 ### Uninstall
 

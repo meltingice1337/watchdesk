@@ -133,8 +133,22 @@ fn is_elevated() -> bool {
 }
 
 fn cmd_install() -> anyhow::Result<()> {
+    // Copy config to ProgramData before elevating (CWD changes after elevation)
+    let config_source = std::path::PathBuf::from("config.toml");
+    let config_dest = config::Config::programdata_config_path();
+
+    if config_source.exists() {
+        std::fs::create_dir_all(config::Config::programdata_dir())?;
+        std::fs::copy(&config_source, &config_dest)?;
+        println!("Config copied to {}", config_dest.display());
+    } else if !config_dest.exists() {
+        eprintln!("Warning: no config.toml found in current directory and none exists at {}", config_dest.display());
+    }
+
     if !is_elevated() {
-        return run_elevated("install");
+        run_elevated("install")?;
+        println!("Service '{SERVICE_NAME}' installed and started.");
+        return Ok(());
     }
 
     let manager = ServiceManager::local_computer(
@@ -164,20 +178,17 @@ fn cmd_install() -> anyhow::Result<()> {
     service
         .set_description("Monitors PC presence and display state for Home Assistant via MQTT")?;
 
-    println!("Service '{SERVICE_NAME}' installed successfully.");
-
     // Start the service immediately
-    match service.start::<OsString>(&[]) {
-        Ok(()) => println!("Service '{SERVICE_NAME}' started."),
-        Err(e) => eprintln!("Warning: failed to start service: {e}"),
-    }
+    service.start::<OsString>(&[])?;
 
     Ok(())
 }
 
 fn cmd_uninstall() -> anyhow::Result<()> {
     if !is_elevated() {
-        return run_elevated("uninstall");
+        run_elevated("uninstall")?;
+        println!("Service '{SERVICE_NAME}' uninstalled.");
+        return Ok(());
     }
 
     let manager = ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT)?;
