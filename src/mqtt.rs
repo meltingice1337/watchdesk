@@ -139,7 +139,7 @@ impl MqttManager {
                                 error!("Failed to publish initial state: {e}");
                             }
                         }
-                        Ok(_) => {} // Ignore other events
+                        Ok(_) => {}
                         Err(e) => {
                             warn!("MQTT error (will reconnect): {e}");
                             tokio::time::sleep(Duration::from_secs(1)).await;

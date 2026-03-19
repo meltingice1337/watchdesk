@@ -38,11 +38,9 @@ fn service_main(_arguments: Vec<OsString>) {
 fn init_file_logger() -> anyhow::Result<()> {
     use std::fs::OpenOptions;
 
-    let exe = std::env::current_exe()?;
-    let log_path = exe
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine exe directory"))?
-        .join("watchdesk.log");
+    let log_dir = Config::programdata_dir();
+    std::fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join("watchdesk.log");
 
     let file = OpenOptions::new()
         .create(true)
@@ -73,18 +71,24 @@ fn run_service() -> anyhow::Result<()> {
                 }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 ServiceControl::PowerEvent(param) => {
+                    info!("PowerEvent received: {param:?}");
                     if let PowerEventParam::PowerSettingChange(setting) = param {
                         let state = match setting {
                             PowerBroadcastSetting::MonitorPowerOn(s) => {
+                                info!("MonitorPowerOn raw value: {}", s.to_raw());
                                 Some(MonitorState::from_power_value(s.to_raw()))
                             }
                             PowerBroadcastSetting::ConsoleDisplayState(s) => {
+                                info!("ConsoleDisplayState raw value: {}", s.to_raw());
                                 Some(MonitorState::from_power_value(s.to_raw() as u32))
                             }
-                            _ => None,
+                            _ => {
+                                info!("Unhandled power broadcast setting: {setting:?}");
+                                None
+                            }
                         };
                         if let Some(state) = state {
-                            info!("Monitor power event from service: {state:?}");
+                            info!("Monitor state resolved: {state:?}");
                             let _ = monitor_tx.send(state);
                         }
                     }
