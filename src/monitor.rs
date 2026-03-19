@@ -9,23 +9,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_POWERBROADCAST, WNDCLASSW,
 };
+use windows::Win32::System::SystemServices::{GUID_CONSOLE_DISPLAY_STATE, GUID_MONITOR_POWER_ON};
 use windows::core::w;
-
-// GUID_CONSOLE_DISPLAY_STATE {6FE69556-704A-47A0-8F24-C28D936FDA47}
-const GUID_CONSOLE_DISPLAY_STATE: windows::core::GUID = windows::core::GUID {
-    data1: 0x6FE6_9556,
-    data2: 0x704A,
-    data3: 0x47A0,
-    data4: [0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47],
-};
-
-// GUID_MONITOR_POWER_ON {02731015-4510-4526-99E6-E5A17EBD1AEA}
-pub const GUID_MONITOR_POWER_ON: windows::core::GUID = windows::core::GUID {
-    data1: 0x0273_1015,
-    data2: 0x4510,
-    data3: 0x4526,
-    data4: [0x99, 0xE6, 0xE5, 0xA1, 0x7E, 0xBD, 0x1A, 0xEA],
-};
 
 const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
 

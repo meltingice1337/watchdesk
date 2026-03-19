@@ -1,5 +1,6 @@
 use crate::config::Config;
-use crate::monitor::{GUID_MONITOR_POWER_ON, MonitorState};
+use crate::monitor::MonitorState;
+use windows::Win32::System::SystemServices::GUID_MONITOR_POWER_ON;
 use crate::mqtt::MqttManager;
 use log::{error, info};
 use std::ffi::OsString;
