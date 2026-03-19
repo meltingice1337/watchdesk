@@ -16,7 +16,7 @@ impl MqttManager {
         let client_id = format!("watchdesk_{}", config.device.name);
         let mut options = MqttOptions::new(&client_id, &config.mqtt.host, config.mqtt.port);
 
-        options.set_keep_alive(Duration::from_secs(10));
+        options.set_keep_alive(Duration::from_secs(30));
         options.set_clean_session(true);
 
         if let (Some(user), Some(pass)) = (&config.mqtt.username, &config.mqtt.password) {
