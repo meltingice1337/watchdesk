@@ -6,6 +6,3 @@ port = 1883
 
 [device]
 name = "Mighty PC"
-
-[settings]
-heartbeat_interval_secs = 60

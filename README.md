@@ -45,9 +45,6 @@ port = 1883
 
 [device]
 name = "My Desktop"
-
-[settings]
-heartbeat_interval_secs = 60
 ```
 
 The `name` field is used as the device name in Home Assistant. It gets slugified for MQTT topics (e.g., `"My Desktop"` becomes `my_desktop`).

@@ -5,8 +5,6 @@ use std::path::PathBuf;
 pub struct Config {
     pub mqtt: MqttConfig,
     pub device: DeviceConfig,
-    #[serde(default)]
-    pub settings: SettingsConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,26 +21,8 @@ pub struct DeviceConfig {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SettingsConfig {
-    #[serde(default = "default_heartbeat")]
-    pub heartbeat_interval_secs: u64,
-}
-
-impl Default for SettingsConfig {
-    fn default() -> Self {
-        Self {
-            heartbeat_interval_secs: default_heartbeat(),
-        }
-    }
-}
-
 fn default_port() -> u16 {
     1883
-}
-
-fn default_heartbeat() -> u64 {
-    60
 }
 
 impl Config {

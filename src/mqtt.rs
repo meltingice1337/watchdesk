@@ -9,7 +9,6 @@ use tokio::sync::mpsc;
 pub struct MqttManager {
     client: AsyncClient,
     device_name: String,
-    heartbeat_interval: Duration,
 }
 
 impl MqttManager {
@@ -40,7 +39,6 @@ impl MqttManager {
         let manager = Self {
             client,
             device_name: config.device.name.clone(),
-            heartbeat_interval: Duration::from_secs(config.settings.heartbeat_interval_secs),
         };
 
         Ok((manager, event_loop))
@@ -123,32 +121,6 @@ impl MqttManager {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         let mut current_state = MonitorState::On; // Assume on at startup
-
-        // Spawn heartbeat task
-        let heartbeat_client = self.client.clone();
-        let heartbeat_topic = self.availability_topic();
-        let heartbeat_interval = self.heartbeat_interval;
-        let mut heartbeat_shutdown = shutdown.clone();
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(heartbeat_interval);
-            interval.tick().await; // Skip first immediate tick
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        if let Err(e) = heartbeat_client
-                            .publish(&heartbeat_topic, QoS::AtLeastOnce, true, "online")
-                            .await
-                        {
-                            warn!("Heartbeat publish failed: {e}");
-                        }
-                    }
-                    _ = heartbeat_shutdown.changed() => {
-                        break;
-                    }
-                }
-            }
-        });
 
         loop {
             tokio::select! {
