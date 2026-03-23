@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::monitor::MonitorState;
-use windows::Win32::System::SystemServices::GUID_MONITOR_POWER_ON;
 use crate::mqtt::MqttManager;
 use log::{error, info};
 use std::ffi::OsString;
@@ -8,6 +7,7 @@ use std::os::windows::io::AsRawHandle;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use windows::Win32::System::Power::RegisterPowerSettingNotification;
+use windows::Win32::System::SystemServices::GUID_MONITOR_POWER_ON;
 use windows::Win32::UI::WindowsAndMessaging::REGISTER_NOTIFICATION_FLAGS;
 use windows_service::service::{
     PowerBroadcastSetting, PowerEventParam, ServiceControl, ServiceControlAccept, ServiceExitCode,

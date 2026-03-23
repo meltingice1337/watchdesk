@@ -114,6 +114,7 @@ impl MqttManager {
     }
 
     /// Run the MQTT manager, processing events and monitor state changes.
+    /// Monitor state changes are debounced (3s) to avoid rapid on/off flips during boot.
     pub async fn run(
         self,
         mut event_loop: rumqttc::EventLoop,
@@ -121,6 +122,9 @@ impl MqttManager {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         let mut current_state = MonitorState::On; // Assume on at startup
+        let mut pending_state: Option<MonitorState> = None;
+        let debounce = tokio::time::sleep(Duration::MAX);
+        tokio::pin!(debounce);
 
         loop {
             tokio::select! {
@@ -148,12 +152,26 @@ impl MqttManager {
                 }
                 Some(state) = monitor_rx.recv() => {
                     if state != current_state {
-                        info!("Monitor state changed: {current_state:?} -> {state:?}");
-                        current_state = state;
-                        if let Err(e) = self.publish_monitor_state(state).await {
-                            error!("Failed to publish state change: {e}");
+                        info!("Monitor state event: {current_state:?} -> {state:?} (debouncing)");
+                        pending_state = Some(state);
+                        debounce.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(3));
+                    } else {
+                        // New event matches current published state, cancel any pending change
+                        if pending_state.is_some() {
+                            info!("Monitor state reverted to {current_state:?}, cancelling pending change");
+                            pending_state = None;
+                            debounce.as_mut().reset(tokio::time::Instant::now() + Duration::MAX);
                         }
                     }
+                }
+                () = &mut debounce, if pending_state.is_some() => {
+                    let state = pending_state.take().unwrap();
+                    info!("Monitor state confirmed: {current_state:?} -> {state:?}");
+                    current_state = state;
+                    if let Err(e) = self.publish_monitor_state(state).await {
+                        error!("Failed to publish state change: {e}");
+                    }
+                    debounce.as_mut().reset(tokio::time::Instant::now() + Duration::MAX);
                 }
                 _ = shutdown.changed() => {
                     info!("MQTT manager shutting down");
