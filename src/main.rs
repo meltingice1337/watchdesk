@@ -12,7 +12,8 @@ use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, Shel
 use windows::core::PCWSTR;
 use windows::core::w;
 use windows_service::service::{
-    ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl, ServiceFailureActions,
+    ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceType,
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
@@ -142,7 +143,10 @@ fn cmd_install() -> anyhow::Result<()> {
         std::fs::copy(&config_source, &config_dest)?;
         println!("Config copied to {}", config_dest.display());
     } else if !config_dest.exists() {
-        eprintln!("Warning: no config.toml found in current directory and none exists at {}", config_dest.display());
+        eprintln!(
+            "Warning: no config.toml found in current directory and none exists at {}",
+            config_dest.display()
+        );
     }
 
     if !is_elevated() {
@@ -177,6 +181,28 @@ fn cmd_install() -> anyhow::Result<()> {
     )?;
     service
         .set_description("Monitors PC presence and display state for Home Assistant via MQTT")?;
+
+    let failure_actions = ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(60)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(5),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(10),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(30),
+            },
+        ]),
+    };
+    service.update_failure_actions(failure_actions)?;
+    service.set_failure_actions_on_non_crash_failures(true)?;
 
     // Start the service immediately
     service.start::<OsString>(&[])?;
