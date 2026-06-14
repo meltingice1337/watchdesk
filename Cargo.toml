@@ -6,7 +6,7 @@ categories = ["monitoring", "mqtt", "homeassistant"]
 keywords = ["mqtt", "homeassistant", "monitoring", "pc status"]
 readme = "README.md"
 name = "watchdesk"
-version = "0.0.9"
+version = "0.1.0"
 edition = "2024"
 
 [dependencies]
