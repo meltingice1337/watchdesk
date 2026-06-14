@@ -3,7 +3,7 @@ mod monitor;
 mod mqtt;
 mod service;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use log::info;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
@@ -12,8 +12,9 @@ use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, Shel
 use windows::core::PCWSTR;
 use windows::core::w;
 use windows_service::service::{
-    ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl, ServiceFailureActions,
-    ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceType,
+    Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl,
+    ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
+    ServiceType,
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
@@ -38,6 +39,8 @@ enum Command {
     Uninstall,
     /// Run in foreground mode (for debugging)
     Run,
+    /// Show service state, active config, and recent log lines
+    Status,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -47,11 +50,28 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Install) => cmd_install(),
         Some(Command::Uninstall) => cmd_uninstall(),
         Some(Command::Run) => cmd_run(),
-        None => {
-            // No subcommand — assume launched by SCM
-            service::dispatch()
-        }
+        Some(Command::Status) => cmd_status(),
+        None => match service::dispatch() {
+            Ok(()) => Ok(()),
+            // ERROR_FAILED_SERVICE_CONTROLLER_CONNECT (1063): we were started from a
+            // shell, not by the Service Control Manager — show help instead of erroring.
+            Err(windows_service::Error::Winapi(ref e)) if e.raw_os_error() == Some(1063) => {
+                print_help_hint();
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        },
     }
+}
+
+/// Hint + CLI help shown when the exe is run directly instead of by the SCM.
+fn print_help_hint() {
+    eprintln!(
+        "WatchDesk is a background Windows service and has no default interactive action.\n\
+         Use one of the commands below (try `watchdesk status` or `watchdesk install`).\n"
+    );
+    let _ = Cli::command().print_help();
+    println!();
 }
 
 /// Re-launch the current exe elevated via UAC with the given subcommand.
@@ -133,6 +153,27 @@ fn is_elevated() -> bool {
     }
 }
 
+/// Path the service binary is installed to and run from (kept separate from the
+/// build output so a running service never locks `target\release\watchdesk.exe`).
+fn installed_exe_path() -> std::path::PathBuf {
+    config::Config::programdata_dir().join("watchdesk.exe")
+}
+
+/// Stop a service if running and wait (up to ~10s) until it reports Stopped, so
+/// its binary is unlocked and can be replaced.
+fn stop_and_wait(service: &Service) {
+    if service.stop().is_ok() {
+        println!("Stopping running service...");
+    }
+    for _ in 0..40 {
+        match service.query_status() {
+            Ok(status) if status.current_state == ServiceState::Stopped => return,
+            Ok(_) => std::thread::sleep(Duration::from_millis(250)),
+            Err(_) => return,
+        }
+    }
+}
+
 fn cmd_install() -> anyhow::Result<()> {
     // Copy config to ProgramData before elevating (CWD changes after elevation)
     let config_source = std::path::PathBuf::from("config.toml");
@@ -155,12 +196,36 @@ fn cmd_install() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Install from a stable location, not the build output. Running the service
+    // directly from target\release would lock watchdesk.exe and break `cargo build`.
+    let install_exe = installed_exe_path();
+    let current_exe = std::env::current_exe()?;
+
     let manager = ServiceManager::local_computer(
         None::<&OsStr>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )?;
 
-    let exe_path = std::env::current_exe()?;
+    // If a previous install exists, stop it first so its binary is unlocked.
+    let existing = manager
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS
+                | ServiceAccess::STOP
+                | ServiceAccess::CHANGE_CONFIG
+                | ServiceAccess::START,
+        )
+        .ok();
+    if let Some(svc) = &existing {
+        stop_and_wait(svc);
+    }
+
+    // Copy ourselves into the install location (skip if we already are it).
+    if current_exe != install_exe {
+        std::fs::copy(&current_exe, &install_exe)
+            .map_err(|e| anyhow::anyhow!("Failed to copy binary to {}: {e}", install_exe.display()))?;
+        println!("Installed binary to {}", install_exe.display());
+    }
 
     let service_info = ServiceInfo {
         name: OsString::from(SERVICE_NAME),
@@ -168,17 +233,24 @@ fn cmd_install() -> anyhow::Result<()> {
         service_type: ServiceType::OWN_PROCESS,
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
-        executable_path: exe_path,
+        executable_path: install_exe.clone(),
         launch_arguments: vec![],
         dependencies: vec![],
         account_name: None, // LocalSystem
         account_password: None,
     };
 
-    let service = manager.create_service(
-        &service_info,
-        ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
-    )?;
+    // Reuse the existing service (repoint it) or create a fresh one.
+    let service = match existing {
+        Some(svc) => {
+            svc.change_config(&service_info)?;
+            svc
+        }
+        None => manager.create_service(
+            &service_info,
+            ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
+        )?,
+    };
     service
         .set_description("Monitors PC presence and display state for Home Assistant via MQTT")?;
 
@@ -219,16 +291,92 @@ fn cmd_uninstall() -> anyhow::Result<()> {
 
     let manager = ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT)?;
 
-    let service =
-        manager.open_service(SERVICE_NAME, ServiceAccess::STOP | ServiceAccess::DELETE)?;
+    match manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
+    ) {
+        Ok(service) => {
+            stop_and_wait(&service);
+            service.delete()?;
+            println!("Service '{SERVICE_NAME}' removed.");
+        }
+        Err(_) => println!("Service '{SERVICE_NAME}' was not installed."),
+    }
 
-    // Try to stop the service first (ignore errors if already stopped)
-    let _ = service.stop();
-    // Brief pause for stop to take effect
-    std::thread::sleep(Duration::from_secs(1));
+    // Best effort: remove the installed binary (ignored if it's the exe we're running).
+    let install_exe = installed_exe_path();
+    if install_exe.exists() {
+        match std::fs::remove_file(&install_exe) {
+            Ok(()) => println!("Removed {}", install_exe.display()),
+            Err(e) => eprintln!(
+                "Note: could not remove {} ({e}). Delete it manually if needed.",
+                install_exe.display()
+            ),
+        }
+    }
+    Ok(())
+}
 
-    service.delete()?;
-    println!("Service '{SERVICE_NAME}' uninstalled successfully.");
+fn cmd_status() -> anyhow::Result<()> {
+    println!("WatchDesk status");
+    println!("================");
+
+    // Service state (query access doesn't require elevation)
+    match ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT) {
+        Ok(manager) => match manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG,
+        ) {
+            Ok(service) => {
+                match service.query_status() {
+                    Ok(status) => {
+                        println!("Service    : installed");
+                        println!("State      : {:?}", status.current_state);
+                        if let Some(pid) = status.process_id {
+                            println!("PID        : {pid}");
+                        }
+                    }
+                    Err(e) => println!("Service    : installed (status query failed: {e})"),
+                }
+                if let Ok(config) = service.query_config() {
+                    println!("Start type : {:?}", config.start_type);
+                    println!("Exe path   : {}", config.executable_path.display());
+                }
+            }
+            Err(_) => println!("Service    : NOT installed"),
+        },
+        Err(e) => println!("Service    : unknown (cannot open service manager: {e})"),
+    }
+
+    // Active config
+    println!();
+    println!("Config     : {}", config::Config::programdata_config_path().display());
+    match config::Config::load() {
+        Ok(c) => {
+            println!("  MQTT     : {}:{}", c.mqtt.host, c.mqtt.port);
+            println!("  Device   : {}", c.device.name);
+            println!(
+                "  Auth     : {}",
+                if c.mqtt.username.is_some() { "credentials set" } else { "anonymous" }
+            );
+        }
+        Err(e) => println!("  (not loaded: {e})"),
+    }
+
+    // Recent log lines
+    println!();
+    let log_path = config::Config::programdata_dir().join("watchdesk.log");
+    if let Ok(contents) = std::fs::read_to_string(&log_path) {
+        let lines: Vec<&str> = contents.lines().collect();
+        let start = lines.len().saturating_sub(10);
+        println!("Recent log ({}):", log_path.display());
+        for line in &lines[start..] {
+            println!("  {line}");
+        }
+    } else {
+        println!("Log        : none at {}", log_path.display());
+    }
+
     Ok(())
 }
 

@@ -19,9 +19,10 @@ use windows_service::service_dispatcher;
 const SERVICE_NAME: &str = "WatchDesk";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-pub fn dispatch() -> anyhow::Result<()> {
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
-    Ok(())
+/// Hand the process to the Service Control Manager. Returns
+/// `Error::Winapi` with OS error 1063 if not launched by the SCM.
+pub fn dispatch() -> Result<(), windows_service::Error> {
+    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
 }
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
