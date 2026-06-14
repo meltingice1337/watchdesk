@@ -138,15 +138,15 @@ fn cmd_install() -> anyhow::Result<()> {
     let config_source = std::path::PathBuf::from("config.toml");
     let config_dest = config::Config::programdata_config_path();
 
+    std::fs::create_dir_all(config::Config::programdata_dir())?;
     if config_source.exists() {
-        std::fs::create_dir_all(config::Config::programdata_dir())?;
         std::fs::copy(&config_source, &config_dest)?;
         println!("Config copied to {}", config_dest.display());
     } else if !config_dest.exists() {
-        eprintln!(
-            "Warning: no config.toml found in current directory and none exists at {}",
-            config_dest.display()
-        );
+        std::fs::write(&config_dest, config::Config::DEFAULT_CONFIG)?;
+        println!("Wrote built-in default config to {}", config_dest.display());
+    } else {
+        println!("Using existing config at {}", config_dest.display());
     }
 
     if !is_elevated() {

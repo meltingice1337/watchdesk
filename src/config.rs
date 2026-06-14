@@ -26,6 +26,10 @@ fn default_port() -> u16 {
 }
 
 impl Config {
+    /// The project-root `config.toml`, embedded at build time. Used as the
+    /// fallback during `install` when no local `config.toml` is present.
+    pub const DEFAULT_CONFIG: &'static str = include_str!("../config.toml");
+
     pub fn load() -> anyhow::Result<Self> {
         let path = config_path()?;
         let contents = std::fs::read_to_string(&path)
