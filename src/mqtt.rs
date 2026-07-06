@@ -241,6 +241,11 @@ impl MqttManager {
     ) -> anyhow::Result<()> {
         let mut current_state = MonitorState::On; // Assume on at startup
         let mut pending_state: Option<MonitorState> = None;
+        // Track whether we're connected to the broker. Publishing while
+        // disconnected backs up the client's bounded request channel; once it's
+        // full, `publish().await` blocks the whole select loop and we can never
+        // observe shutdown — which is exactly what wedges the service on stop.
+        let mut connected = false;
         let debounce = tokio::time::sleep(Duration::MAX);
         tokio::pin!(debounce);
 
@@ -265,6 +270,7 @@ impl MqttManager {
                     match event {
                         Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                             info!("MQTT connected");
+                            connected = true;
                             if let Err(e) = self.publish_online().await {
                                 error!("Failed to publish online: {e}");
                             }
@@ -281,6 +287,7 @@ impl MqttManager {
                         }
                         Ok(_) => {}
                         Err(e) => {
+                            connected = false;
                             warn!("MQTT error (will reconnect): {e}");
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
@@ -304,37 +311,57 @@ impl MqttManager {
                     let state = pending_state.take().unwrap();
                     info!("Monitor state confirmed: {current_state:?} -> {state:?}");
                     current_state = state;
-                    if let Err(e) = self.publish_monitor_state(state).await {
-                        error!("Failed to publish state change: {e}");
+                    // Only publish when connected; the ConnAck handler republishes
+                    // current_state on reconnect, so nothing is lost by skipping here.
+                    if connected {
+                        if let Err(e) = self.publish_monitor_state(state).await {
+                            error!("Failed to publish state change: {e}");
+                        }
                     }
                     debounce.as_mut().reset(tokio::time::Instant::now() + Duration::MAX);
                 }
                 _ = metrics_tick.tick() => {
+                    // Keep sampling so the usage delta window stays current, but only
+                    // publish while connected — otherwise these ticks back up the
+                    // request channel and eventually block the loop (wedging stop).
                     if self.metrics.cpu_usage {
                         let usage = cpu_usage.sample();
-                        if let Err(e) = self.publish_cpu_usage(usage).await {
-                            error!("Failed to publish CPU usage: {e}");
+                        if connected {
+                            if let Err(e) = self.publish_cpu_usage(usage).await {
+                                error!("Failed to publish CPU usage: {e}");
+                            }
                         }
                     }
                     // Publish temperature only when the sidecar has a real reading;
                     // otherwise leave the sensor's last value in place.
-                    if let Some(temp) = &latest_temp {
-                        let value = *temp.lock().unwrap();
-                        if let Some(t) = value {
-                            if let Err(e) = self.publish_cpu_temp(t).await {
-                                error!("Failed to publish CPU temp: {e}");
+                    if connected {
+                        if let Some(temp) = &latest_temp {
+                            let value = *temp.lock().unwrap();
+                            if let Some(t) = value {
+                                if let Err(e) = self.publish_cpu_temp(t).await {
+                                    error!("Failed to publish CPU temp: {e}");
+                                }
                             }
                         }
                     }
                 }
                 _ = shutdown.changed() => {
                     info!("MQTT manager shutting down");
-                    // Publish offline before exiting (best effort)
-                    let _ = self.client
-                        .publish(self.availability_topic(), QoS::AtLeastOnce, true, "offline")
+                    // Best-effort retained "offline", but hard-bounded by a timeout so a
+                    // stalled or unreachable broker can never delay shutdown. When we're
+                    // not connected, the broker's Last Will already marks us offline, so
+                    // there's nothing to send.
+                    if connected {
+                        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                            let _ = self
+                                .client
+                                .publish(self.availability_topic(), QoS::AtLeastOnce, true, "offline")
+                                .await;
+                            // Poll once so the packet is flushed before we drop the loop.
+                            let _ = event_loop.poll().await;
+                        })
                         .await;
-                    // Give a moment for the message to be sent
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                     break;
                 }
             }
