@@ -6,6 +6,7 @@ A Windows Service written in Rust that publishes PC online status and monitor po
 
 - **Windows Service**: auto-starts at boot, runs in the background
 - **Monitor power detection**: detects when your display turns on/off
+- **CPU metrics**: publishes CPU usage (%) and, on supported hardware, CPU temperature (°C)
 - **MQTT with LWT**: Last Will and Testament ensures Home Assistant knows when your PC goes offline, even on crashes or network drops
 - **HA auto-discovery**: automatically registers as a device in Home Assistant via MQTT discovery
 - **UAC elevation**: install/uninstall commands automatically prompt for admin privileges
@@ -17,7 +18,9 @@ A Windows Service written in Rust that publishes PC online status and monitor po
 |---------|-------|--------|
 | Availability (LWT) | `watchdesk/{name}/availability` | `online` / `offline` |
 | Monitor state | `watchdesk/{name}/monitor/state` | `ON` / `OFF` |
-| HA Discovery | `homeassistant/binary_sensor/watchdesk_{name}_monitor/config` | JSON (retained) |
+| CPU usage | `watchdesk/{name}/cpu/usage` | percent, e.g. `12.5` |
+| CPU temperature | `watchdesk/{name}/cpu/temperature` | °C, e.g. `50.4` |
+| HA Discovery | `homeassistant/{binary_sensor,sensor}/watchdesk_{name}_*/config` | JSON (retained) |
 
 ## Installation
 
@@ -90,6 +93,22 @@ Runs interactively with console logging. Useful for testing your MQTT connection
 
 The MQTT client (`rumqttc`) handles reconnection automatically. On reconnect, the service re-publishes the discovery config, availability status, and current monitor state.
 
+### CPU Metrics
+
+Configured under `[metrics]` in `config.toml` (all optional; defaults shown):
+
+```toml
+[metrics]
+interval_secs = 5   # how often to sample and publish
+cpu_usage = true    # global CPU usage (%)
+cpu_temp = true     # CPU temperature (°C)
+```
+
+- **Usage** is sampled in-process with [`sysinfo`](https://crates.io/crates/sysinfo) — no special privileges, works everywhere.
+- **Temperature** is read from a small **sensor sidecar** (`sidecar/WatchdeskSensors.cs`) that hosts [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) headless and streams the value as JSON. Windows exposes no reliable public API for CPU package temperature, so a hardware-monitoring library (which loads a kernel driver) is required.
+
+  The sidecar and the minimal LibreHardwareMonitor DLLs are **compiled and embedded into `watchdesk.exe` at build time** (via the in-box .NET Framework compiler — no .NET SDK needed) and extracted to `C:\ProgramData\WatchDesk\sensors\` on `install`. Because the driver needs elevation, temperature only produces readings under the **service** (which runs as LocalSystem); in a plain `watchdesk run` shell it reports unavailable rather than a bogus `0`. If the sidecar or driver can't read the sensor, usage keeps working and the temperature entity simply holds its last value.
+
 ## Home Assistant Example
 
 Automation to control a desk light based on PC state:
@@ -120,12 +139,17 @@ The `default` branch handles both `off` and `unavailable` states.
 ## Project Structure
 
 ```
+build.rs          # compiles + embeds the sensor sidecar at build time
 src/
-├── main.rs       # CLI entry point (install/uninstall/run)
+├── main.rs       # CLI entry point (install/uninstall/run), asset extraction
 ├── service.rs    # Windows Service integration (SCM, power events)
 ├── monitor.rs    # Monitor power state detection (Win32 API)
 ├── mqtt.rs       # MQTT client, HA auto-discovery, LWT
+├── metrics.rs    # CPU usage (sysinfo) + temperature (sidecar) collection
 └── config.rs     # TOML config parsing
+sidecar/
+└── WatchdeskSensors.cs   # headless LibreHardwareMonitor host (C#)
+vendor/lhm/       # bundled LibreHardwareMonitor DLLs (MPL-2.0)
 ```
 
 ## License

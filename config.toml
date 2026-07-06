@@ -6,3 +6,15 @@ port = 1883
 
 [device]
 name = "Mighty PC"
+
+# Optional CPU metrics. This whole section can be omitted — everything below is
+# the default. Sensors appear in Home Assistant under the same device.
+[metrics]
+# How often to sample and publish, in seconds.
+interval_secs = 5
+# Global CPU usage (%). Pure in-process sampling; always works.
+cpu_usage = true
+# CPU temperature (°C), read via the bundled LibreHardwareMonitor sidecar.
+# Only produces readings under the service (LocalSystem) where its kernel
+# driver can load; shows unavailable in plain foreground/non-elevated runs.
+cpu_temp = true

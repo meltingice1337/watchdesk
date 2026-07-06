@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub struct Config {
     pub mqtt: MqttConfig,
     pub device: DeviceConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,8 +23,43 @@ pub struct DeviceConfig {
     pub name: String,
 }
 
+/// Optional CPU metrics (usage + temperature). Everything defaults on, so an
+/// existing config without a `[metrics]` section keeps working and gains the
+/// sensors automatically.
+#[derive(Debug, Deserialize, Clone)]
+pub struct MetricsConfig {
+    /// How often to sample and publish, in seconds.
+    #[serde(default = "default_interval")]
+    pub interval_secs: u64,
+    /// Publish global CPU usage (%). Pure Rust via sysinfo; always works.
+    #[serde(default = "default_true")]
+    pub cpu_usage: bool,
+    /// Publish CPU temperature (°C). Read via the bundled LibreHardwareMonitor
+    /// sidecar; requires the service (LocalSystem) so its driver can load.
+    #[serde(default = "default_true")]
+    pub cpu_temp: bool,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_interval(),
+            cpu_usage: true,
+            cpu_temp: true,
+        }
+    }
+}
+
 fn default_port() -> u16 {
     1883
+}
+
+fn default_interval() -> u64 {
+    5
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {
@@ -44,6 +81,16 @@ impl Config {
 
     pub fn programdata_config_path() -> PathBuf {
         Self::programdata_dir().join("config.toml")
+    }
+
+    /// Directory holding the sensor sidecar and its bundled DLLs.
+    pub fn programdata_sensors_dir() -> PathBuf {
+        Self::programdata_dir().join("sensors")
+    }
+
+    /// Full path to the sensor sidecar executable the service spawns.
+    pub fn sensors_exe_path() -> PathBuf {
+        Self::programdata_sensors_dir().join("watchdesk-sensors.exe")
     }
 }
 
