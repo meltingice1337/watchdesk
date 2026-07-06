@@ -26,12 +26,12 @@ use windows_service::service::{
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 const SERVICE_NAME: &str = "WatchDesk";
-const DISPLAY_NAME: &str = "WatchDesk PC Presence Monitor";
+const DISPLAY_NAME: &str = "WatchDesk PC Status & Sensors";
 
 #[derive(Parser)]
 #[command(
     name = "watchdesk",
-    about = "PC & Monitor Presence Service for Home Assistant"
+    about = "PC status & sensors for Home Assistant (monitor state, CPU usage & temperature)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -171,9 +171,20 @@ fn installed_exe_path() -> std::path::PathBuf {
 fn extract_sensor_assets() -> anyhow::Result<()> {
     let dir = config::Config::programdata_sensors_dir();
     std::fs::create_dir_all(&dir)?;
+
+    // A sidecar from a previous run may still be alive (Windows doesn't kill
+    // child processes with their parent) and would hold these files locked.
+    // Terminate any lingering instance, then let Windows release the handles.
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "watchdesk-sensors.exe", "/T"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(400));
+
     for (name, bytes) in sensor_assets::SENSOR_ASSETS {
         let path = dir.join(name);
-        std::fs::write(&path, bytes)
+        write_with_retry(&path, bytes)
             .map_err(|e| anyhow::anyhow!("Failed to write {}: {e}", path.display()))?;
     }
     println!(
@@ -182,6 +193,37 @@ fn extract_sensor_assets() -> anyhow::Result<()> {
         dir.display()
     );
     Ok(())
+}
+
+/// Write a file, retrying briefly if it is transiently locked (e.g. a sidecar
+/// handle not yet released after termination).
+fn write_with_retry(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut last_err = None;
+    for _ in 0..10 {
+        match std::fs::write(path, bytes) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+    Err(last_err.expect("loop runs at least once"))
+}
+
+/// Where the elevated install/uninstall half records its outcome so the
+/// (non-elevated) parent — which can't see the hidden window's output — can
+/// surface the real error instead of just "exited with code 1".
+fn install_log_path() -> std::path::PathBuf {
+    config::Config::programdata_dir().join("install.log")
+}
+
+fn log_elevated_result(action: &str, result: &anyhow::Result<()>) {
+    let msg = match result {
+        Ok(()) => format!("{action}: success\n"),
+        Err(e) => format!("{action}: FAILED\n{e:#}\n"),
+    };
+    let _ = std::fs::write(install_log_path(), msg);
 }
 
 /// Stop a service if running and wait (up to ~10s) until it reports Stopped, so
@@ -216,11 +258,37 @@ fn cmd_install() -> anyhow::Result<()> {
     }
 
     if !is_elevated() {
-        run_elevated("install")?;
-        println!("Service '{SERVICE_NAME}' installed and started.");
-        return Ok(());
+        return match run_elevated("install") {
+            Ok(()) => {
+                println!("Service '{SERVICE_NAME}' installed and started.");
+                Ok(())
+            }
+            Err(e) => Err(with_elevated_log(e)),
+        };
     }
 
+    // Elevated half: do the work and record the outcome so the parent — which
+    // can't read this hidden window's output — can surface it.
+    let result = install_service();
+    log_elevated_result("install", &result);
+    result
+}
+
+/// Enrich an elevation failure with whatever the elevated half logged.
+fn with_elevated_log(e: anyhow::Error) -> anyhow::Error {
+    match std::fs::read_to_string(install_log_path()) {
+        Ok(details) if !details.trim().is_empty() => anyhow::anyhow!(
+            "{e}\n\n--- elevated log ({}) ---\n{}",
+            install_log_path().display(),
+            details.trim()
+        ),
+        _ => e,
+    }
+}
+
+/// The elevated portion of installation: stop any existing service, swap the
+/// binary, drop the sidecar bundle, then (re)create and start the service.
+fn install_service() -> anyhow::Result<()> {
     // Install from a stable location, not the build output. Running the service
     // directly from target\release would lock watchdesk.exe and break `cargo build`.
     let install_exe = installed_exe_path();
@@ -281,7 +349,9 @@ fn cmd_install() -> anyhow::Result<()> {
         )?,
     };
     service
-        .set_description("Monitors PC presence and display state for Home Assistant via MQTT")?;
+        .set_description(
+            "Publishes PC status (monitor state, CPU usage & temperature) to Home Assistant via MQTT",
+        )?;
 
     let failure_actions = ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(60)),
@@ -313,11 +383,21 @@ fn cmd_install() -> anyhow::Result<()> {
 
 fn cmd_uninstall() -> anyhow::Result<()> {
     if !is_elevated() {
-        run_elevated("uninstall")?;
-        println!("Service '{SERVICE_NAME}' uninstalled.");
-        return Ok(());
+        return match run_elevated("uninstall") {
+            Ok(()) => {
+                println!("Service '{SERVICE_NAME}' uninstalled.");
+                Ok(())
+            }
+            Err(e) => Err(with_elevated_log(e)),
+        };
     }
 
+    let result = uninstall_service();
+    log_elevated_result("uninstall", &result);
+    result
+}
+
+fn uninstall_service() -> anyhow::Result<()> {
     let manager = ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT)?;
 
     match manager.open_service(

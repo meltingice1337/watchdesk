@@ -1,5 +1,5 @@
 [package]
-description = "A service to monitor PC and display status over MQTT for Home Assistant"
+description = "A service that publishes PC status (monitor state, CPU usage & temperature) to Home Assistant over MQTT"
 license = "MIT"
 repository = "https://github.com/meltingice1337/watchdesk"
 categories = ["monitoring", "mqtt", "homeassistant"]

@@ -64,11 +64,17 @@ async fn read_loop(exe: &PathBuf, interval_secs: u64, out: &SharedTemp) -> anyho
         ));
     }
 
+    // Clear any orphaned sidecar (e.g. left behind by a hard service kill) before
+    // starting ours, so it can't lock the DLLs or double-publish.
+    kill_orphan_sidecars().await;
+
     let mut child = Command::new(exe)
         .arg(interval_secs.to_string())
         .arg("0") // run forever
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        // Ensure the sidecar dies with us on graceful shutdown (runtime drop).
+        .kill_on_drop(true)
         .spawn()?;
 
     let stdout = child
@@ -93,4 +99,16 @@ async fn read_loop(exe: &PathBuf, interval_secs: u64, out: &SharedTemp) -> anyho
 
     let _ = child.wait().await;
     Ok(())
+}
+
+/// Terminate any lingering sidecar by image name (best effort). Used before
+/// (re)spawning so an orphan from a hard service kill can't lock files or
+/// double-publish.
+async fn kill_orphan_sidecars() {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "watchdesk-sensors.exe", "/T"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 }

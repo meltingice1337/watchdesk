@@ -74,7 +74,7 @@ impl MqttManager {
             "identifiers": [format!("watchdesk_{slug}")],
             "name": &self.device_name,
             "manufacturer": "WatchDesk - meltingice1337",
-            "model": "PC Presence Monitor"
+            "model": "PC Status & Sensors"
         })
     }
 
