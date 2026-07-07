@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::monitor::MonitorState;
 use crate::mqtt::MqttManager;
+use crate::startup;
 use log::{error, info};
 use std::ffi::OsString;
 use std::os::windows::io::AsRawHandle;
@@ -132,6 +133,8 @@ fn run_service() -> anyhow::Result<()> {
             return Err(e);
         }
     };
+
+    startup::run_once_after_boot(&config);
 
     // Register for monitor power notifications in service mode
     unsafe {

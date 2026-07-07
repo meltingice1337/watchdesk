@@ -7,6 +7,7 @@ A Windows Service written in Rust that publishes PC online status and monitor po
 - **Windows Service**: auto-starts at boot, runs in the background
 - **Monitor power detection**: detects when your display turns on/off
 - **CPU metrics**: publishes CPU usage (%) and, on supported hardware, CPU temperature (°C)
+- **Optional Bluetooth shutdown**: can turn off the Windows Bluetooth radio on startup
 - **MQTT with LWT**: Last Will and Testament ensures Home Assistant knows when your PC goes offline, even on crashes or network drops
 - **HA auto-discovery**: automatically registers as a device in Home Assistant via MQTT discovery
 - **UAC elevation**: install/uninstall commands automatically prompt for admin privileges
@@ -48,9 +49,24 @@ port = 1883
 
 [device]
 name = "My Desktop"
+
+[startup]
+# Optional: once per Windows boot, turn off the Windows Bluetooth radio.
+turn_off_bluetooth = false
 ```
 
 The `name` field is used as the device name in Home Assistant. It gets slugified for MQTT topics (e.g., `"My Desktop"` becomes `my_desktop`).
+
+### Startup Actions
+
+Configured under `[startup]` in `config.toml`:
+
+```toml
+[startup]
+turn_off_bluetooth = true
+```
+
+When enabled, WatchDesk runs a one-shot startup action once per Windows boot that turns the active Windows Bluetooth radio off using Microsoft's `Windows.Devices.Radios` API. This matches the Windows Settings/Quick Settings Bluetooth toggle more closely than disabling the adapter in Device Manager. Later WatchDesk restarts during the same boot skip the action. If Windows rejects the radio change, WatchDesk logs the error and keeps running.
 
 ### Install as a Service
 

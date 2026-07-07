@@ -6,6 +6,8 @@ pub struct Config {
     pub mqtt: MqttConfig,
     pub device: DeviceConfig,
     #[serde(default)]
+    pub startup: StartupConfig,
+    #[serde(default)]
     pub metrics: MetricsConfig,
 }
 
@@ -21,6 +23,24 @@ pub struct MqttConfig {
 #[derive(Debug, Deserialize)]
 pub struct DeviceConfig {
     pub name: String,
+}
+
+/// Optional one-shot actions to run when WatchDesk starts.
+#[derive(Debug, Deserialize, Clone)]
+pub struct StartupConfig {
+    /// Turn the Windows Bluetooth radio off on startup. Useful when
+    /// auto-starting the service at boot to prevent headphones from being
+    /// stolen from a phone.
+    #[serde(default, alias = "disable_bluetooth")]
+    pub turn_off_bluetooth: bool,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            turn_off_bluetooth: false,
+        }
+    }
 }
 
 /// Optional CPU metrics (usage + temperature). Everything defaults on, so an

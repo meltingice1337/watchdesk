@@ -7,6 +7,11 @@ port = 1883
 [device]
 name = "Mighty PC"
 
+[startup]
+# Once per Windows boot, turn off the Bluetooth radio like pressing the
+# Bluetooth toggle in Windows Settings/Quick Settings.
+turn_off_bluetooth = true
+
 # Optional CPU metrics. This whole section can be omitted — everything below is
 # the default. Sensors appear in Home Assistant under the same device.
 [metrics]
