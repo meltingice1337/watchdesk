@@ -9,7 +9,7 @@ use windows::Wdk::System::SystemInformation::{
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
-const STARTUP_ACTION_MAX_UPTIME: Duration = Duration::from_secs(15 * 60);
+const STARTUP_ACTION_MAX_UPTIME: Duration = Duration::from_secs(60);
 
 pub fn run_once_after_boot(config: &Config) {
     if !config.startup.turn_off_bluetooth {
