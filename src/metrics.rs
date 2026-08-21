@@ -1,18 +1,34 @@
 //! CPU metrics collection.
 //!
 //! - **Usage** is sampled in-process with `sysinfo` (no privileges needed).
-//! - **Temperature** comes from the bundled sensor sidecar (see
-//!   `sidecar/WatchdeskSensors.cs`), which hosts LibreHardwareMonitor headless
-//!   and streams JSON lines. We keep the latest value in a shared cell and
-//!   restart the sidecar if it dies.
+//! - **Temperature** is polled from AMD's Ryzen Master SDK command line tool
+//!   (`AMDRyzenMasterCLI.exe --api GetPMTableData`), whose output carries a
+//!   `GetCurrentTemperature ..... NN.NN Celsius` line.
+//!
+//! Reading Ryzen Tctl requires a kernel driver, so we shell out to AMD's own
+//! *signed* CLI instead of hosting a hardware-monitoring library ourselves.
+//! Windows systems with Smart App Control enabled block unsigned executables
+//! outright — including anything we compile — while AMD ships both the CLI and
+//! `AMDRyzenMasterDriver.sys` signed, so this path adds no unsigned code.
+//!
+//! The driver needs elevation, which the service satisfies by running as
+//! LocalSystem; under a plain `watchdesk run` shell the CLI reports
+//! "User is not admin" and temperature stays unavailable.
 
 use log::{info, warn};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use sysinfo::System;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+/// Give up on a single CLI invocation that hasn't returned by now.
+const CLI_TIMEOUT: Duration = Duration::from_secs(20);
+/// First retry delay after a failed read, doubled up to `MAX_BACKOFF`.
+const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
+/// Ceiling for the retry delay, so a persistent failure stays quiet.
+const MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 /// Global CPU-usage sampler backed by sysinfo.
 pub struct CpuUsage {
@@ -38,77 +54,145 @@ impl CpuUsage {
 /// Latest CPU temperature in °C, or `None` when unavailable.
 pub type SharedTemp = Arc<Mutex<Option<f32>>>;
 
-/// Spawn a background task that runs the sensor sidecar and keeps the shared
-/// temperature updated. The sidecar is restarted if it exits or errors.
-pub fn spawn_temp_reader(exe: PathBuf, interval_secs: u64) -> SharedTemp {
+/// Spawn a background task that polls `cli` and keeps the shared temperature
+/// updated. Failures back off exponentially and are logged only when the error
+/// changes, so an unreadable sensor can't flood the log.
+pub fn spawn_temp_reader(cli: PathBuf, interval_secs: u64) -> SharedTemp {
     let shared: SharedTemp = Arc::new(Mutex::new(None));
     let out = shared.clone();
+    let interval = Duration::from_secs(interval_secs.max(1));
+
     tokio::spawn(async move {
+        info!("Reading CPU temperature via {}", cli.display());
+        let mut backoff = INITIAL_BACKOFF;
+        let mut last_err: Option<String> = None;
+        let mut reported_ok = false;
+
         loop {
-            match read_loop(&exe, interval_secs, &out).await {
-                Ok(()) => warn!("sensor sidecar exited; restarting in 15s"),
-                Err(e) => warn!("sensor sidecar unavailable: {e}; retrying in 15s"),
+            match read_temperature(&cli).await {
+                Ok(temp) => {
+                    if !reported_ok {
+                        info!("CPU temperature available: {temp:.1} °C");
+                        reported_ok = true;
+                    }
+                    *out.lock().unwrap() = Some(temp);
+                    backoff = INITIAL_BACKOFF;
+                    last_err = None;
+                    tokio::time::sleep(interval).await;
+                }
+                Err(e) => {
+                    // Drop the stale reading so we never publish a value the
+                    // sensor is no longer producing.
+                    *out.lock().unwrap() = None;
+                    reported_ok = false;
+
+                    let msg = e.to_string();
+                    if last_err.as_deref() != Some(msg.as_str()) {
+                        warn!(
+                            "CPU temperature unavailable: {msg} \
+                             (retrying, backing off to at most {}s)",
+                            MAX_BACKOFF.as_secs()
+                        );
+                        last_err = Some(msg);
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                }
             }
-            *out.lock().unwrap() = None; // temperature is now unavailable
-            tokio::time::sleep(Duration::from_secs(15)).await;
         }
     });
+
     shared
 }
 
-async fn read_loop(exe: &PathBuf, interval_secs: u64, out: &SharedTemp) -> anyhow::Result<()> {
-    if !exe.exists() {
-        return Err(anyhow::anyhow!(
-            "sidecar not found at {} (run `watchdesk install`)",
-            exe.display()
-        ));
+/// Run the CLI once and pull the CPU temperature out of its report.
+async fn read_temperature(cli: &Path) -> anyhow::Result<f32> {
+    if !cli.exists() {
+        return Err(anyhow::anyhow!("{} not found", cli.display()));
     }
 
-    // Clear any orphaned sidecar (e.g. left behind by a hard service kill) before
-    // starting ours, so it can't lock the DLLs or double-publish.
-    kill_orphan_sidecars().await;
-
-    let mut child = Command::new(exe)
-        .arg(interval_secs.to_string())
-        .arg("0") // run forever
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        // Ensure the sidecar dies with us on graceful shutdown (runtime drop).
+    let run = Command::new(cli)
+        .args(["--api", "GetPMTableData"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
         .kill_on_drop(true)
-        .spawn()?;
+        .output();
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture sidecar stdout"))?;
-    info!("sensor sidecar started (pid {:?})", child.id());
+    let output = tokio::time::timeout(CLI_TIMEOUT, run)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{} did not return within {}s",
+                cli.display(),
+                CLI_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("failed to run {}: {e}", cli.display()))?;
 
-    let mut lines = BufReader::new(stdout).lines();
-    while let Some(line) = lines.next_line().await? {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Lines look like {"cpu_temp_c":50.4} or {"cpu_temp_c":null}.
-        // Ignore anything that doesn't parse (leave the last value in place).
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            let temp = v.get("cpu_temp_c").and_then(|x| x.as_f64()).map(|f| f as f32);
-            *out.lock().unwrap() = temp;
-        }
-    }
-
-    let _ = child.wait().await;
-    Ok(())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_temperature(&stdout).ok_or_else(|| {
+        // Surface whatever the tool actually said — typically
+        // "User is not admin..." or a "Platform init failed" line.
+        let detail = stdout
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("no output");
+        anyhow::anyhow!("no temperature in CLI output ({detail})")
+    })
 }
 
-/// Terminate any lingering sidecar by image name (best effort). Used before
-/// (re)spawning so an orphan from a hard service kill can't lock files or
-/// double-publish.
-async fn kill_orphan_sidecars() {
-    let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "watchdesk-sensors.exe", "/T"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
+/// Pull the reading out of a `GetCurrentTemperature ..... 47.41 Celsius` line.
+fn parse_temperature(stdout: &str) -> Option<f32> {
+    for line in stdout.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("GetCurrentTemperature") else {
+            continue;
+        };
+        // `rest` looks like " ............................. 47.41 Celsius".
+        let temp: f32 = rest
+            .trim_matches(|c: char| c == '.' || c.is_whitespace())
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()?;
+        // The SDK leaves its temperature field at -1 when unpopulated, and a
+        // running CPU is never at 0 °C.
+        if temp > 0.0 && temp < 150.0 {
+            return Some(temp);
+        }
+        return None;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_temperature;
+
+    #[test]
+    fn reads_the_temperature_line() {
+        let out = "\
+GetPMTableData .................................... cHTC Current Limit: 95.000000 celsius\r
+GetPMTableData .................................... cHTC Current Value: 47.413761 celsius\r
+GetCurrentTemperature ............................. 47.41 Celsius\r
+GetAverageCoreVoltage ............................. 1.187500 V\r
+";
+        assert_eq!(parse_temperature(out), Some(47.41));
+    }
+
+    #[test]
+    fn rejects_the_deprecated_api_response() {
+        let out = "GetCurrentTemperature ............................. Deprecated API. Use GetPMTableData";
+        assert_eq!(parse_temperature(out), None);
+    }
+
+    #[test]
+    fn rejects_unpopulated_and_missing_values() {
+        assert_eq!(
+            parse_temperature("GetCurrentTemperature ......... -1.00 Celsius"),
+            None
+        );
+        assert_eq!(parse_temperature("User is not admin..."), None);
+        assert_eq!(parse_temperature(""), None);
+    }
 }

@@ -3,6 +3,7 @@ use crate::monitor::MonitorState;
 use log::{error, info, warn};
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 use serde_json::json;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -10,6 +11,8 @@ pub struct MqttManager {
     client: AsyncClient,
     device_name: String,
     metrics: crate::config::MetricsConfig,
+    /// Resolved path to AMD's Ryzen Master CLI, or `None` if the SDK is absent.
+    temp_cli: Option<PathBuf>,
 }
 
 impl MqttManager {
@@ -41,6 +44,7 @@ impl MqttManager {
             client,
             device_name: config.device.name.clone(),
             metrics: config.metrics.clone(),
+            temp_cli: config.ryzen_master_cli_path(),
         };
 
         Ok((manager, event_loop))
@@ -132,6 +136,12 @@ impl MqttManager {
         format!("watchdesk/{}/cpu/temperature", self.slug())
     }
 
+    /// Per-sensor availability, so temperature can go unavailable on its own
+    /// while the rest of the device stays online.
+    fn cpu_temp_availability_topic(&self) -> String {
+        format!("watchdesk/{}/cpu/temperature/availability", self.slug())
+    }
+
     fn cpu_temp_discovery_topic(&self) -> String {
         format!(
             "homeassistant/sensor/watchdesk_{}_cpu_temp/config",
@@ -148,7 +158,13 @@ impl MqttManager {
             "unit_of_measurement": "°C",
             "state_class": "measurement",
             "suggested_display_precision": 1,
-            "availability_topic": self.availability_topic(),
+            // Unavailable when the service is down *or* when the sensor has no
+            // reading, so HA shows "Unavailable" instead of a stale value.
+            "availability_mode": "all",
+            "availability": [
+                { "topic": self.availability_topic() },
+                { "topic": self.cpu_temp_availability_topic() }
+            ],
             "payload_available": "online",
             "payload_not_available": "offline",
             "unique_id": format!("watchdesk_{slug}_cpu_temp"),
@@ -205,6 +221,18 @@ impl MqttManager {
         Ok(())
     }
 
+    async fn publish_cpu_temp_available(&self, available: bool) -> anyhow::Result<()> {
+        self.client
+            .publish(
+                self.cpu_temp_availability_topic(),
+                QoS::AtLeastOnce,
+                true,
+                if available { "online" } else { "offline" },
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn publish_online(&self) -> anyhow::Result<()> {
         self.client
             .publish(self.availability_topic(), QoS::AtLeastOnce, true, "online")
@@ -253,14 +281,22 @@ impl MqttManager {
         // from the sensor sidecar. First tick fires one interval in, so the first
         // usage sample spans a real window rather than a near-zero delta.
         let mut cpu_usage = crate::metrics::CpuUsage::new();
-        let latest_temp = if self.metrics.cpu_temp {
-            Some(crate::metrics::spawn_temp_reader(
-                Config::sensors_exe_path(),
+        let latest_temp = match (self.metrics.cpu_temp, self.temp_cli.clone()) {
+            (true, Some(cli)) => Some(crate::metrics::spawn_temp_reader(
+                cli,
                 self.metrics.interval_secs,
-            ))
-        } else {
-            None
+            )),
+            (true, None) => {
+                warn!(
+                    "CPU temperature is enabled but the AMD Ryzen Master SDK was not \
+                     found; install it or set [metrics] ryzen_master_cli in config.toml"
+                );
+                None
+            }
+            (false, _) => None,
         };
+        // `None` until published once, so the first tick always sends it.
+        let mut temp_available: Option<bool> = None;
         let poll = Duration::from_secs(self.metrics.interval_secs.max(1));
         let mut metrics_tick = tokio::time::interval_at(tokio::time::Instant::now() + poll, poll);
 
@@ -271,6 +307,9 @@ impl MqttManager {
                         Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                             info!("MQTT connected");
                             connected = true;
+                            // Re-send the temperature sensor's availability on a
+                            // fresh session rather than relying on retention.
+                            temp_available = None;
                             if let Err(e) = self.publish_online().await {
                                 error!("Failed to publish online: {e}");
                             }
@@ -332,14 +371,32 @@ impl MqttManager {
                             }
                         }
                     }
-                    // Publish temperature only when the sidecar has a real reading;
-                    // otherwise leave the sensor's last value in place.
-                    if connected {
-                        if let Some(temp) = &latest_temp {
-                            let value = *temp.lock().unwrap();
-                            if let Some(t) = value {
-                                if let Err(e) = self.publish_cpu_temp(t).await {
-                                    error!("Failed to publish CPU temp: {e}");
+                    // Publish temperature when there's a reading, and mark the
+                    // sensor unavailable when there isn't — otherwise HA keeps
+                    // showing the last value indefinitely. This runs whenever
+                    // the sensor is configured, including when no reader could
+                    // be started, so a retained "online" from an earlier run
+                    // can't resurrect a stale reading.
+                    if connected && self.metrics.cpu_temp {
+                        let value = latest_temp.as_ref().and_then(|t| *t.lock().unwrap());
+                        if let Some(t) = value {
+                            if let Err(e) = self.publish_cpu_temp(t).await {
+                                error!("Failed to publish CPU temp: {e}");
+                            }
+                        }
+                        // Only on change; the topic is retained.
+                        let available = value.is_some();
+                        if temp_available != Some(available) {
+                            match self.publish_cpu_temp_available(available).await {
+                                Ok(()) => {
+                                    info!(
+                                        "CPU temperature sensor is now {}",
+                                        if available { "available" } else { "unavailable" }
+                                    );
+                                    temp_available = Some(available);
+                                }
+                                Err(e) => {
+                                    error!("Failed to publish CPU temp availability: {e}")
                                 }
                             }
                         }

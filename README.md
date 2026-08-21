@@ -6,7 +6,7 @@ A Windows Service written in Rust that publishes PC online status and monitor po
 
 - **Windows Service**: auto-starts at boot, runs in the background
 - **Monitor power detection**: detects when your display turns on/off
-- **CPU metrics**: publishes CPU usage (%) and, on supported hardware, CPU temperature (°C)
+- **CPU metrics**: publishes CPU usage (%) and, on AMD Ryzen with the Ryzen Master SDK installed, CPU temperature (°C)
 - **Optional Bluetooth shutdown**: can turn off the Windows Bluetooth radio on startup
 - **MQTT with LWT**: Last Will and Testament ensures Home Assistant knows when your PC goes offline, even on crashes or network drops
 - **HA auto-discovery**: automatically registers as a device in Home Assistant via MQTT discovery
@@ -21,6 +21,7 @@ A Windows Service written in Rust that publishes PC online status and monitor po
 | Monitor state | `watchdesk/{name}/monitor/state` | `ON` / `OFF` |
 | CPU usage | `watchdesk/{name}/cpu/usage` | percent, e.g. `12.5` |
 | CPU temperature | `watchdesk/{name}/cpu/temperature` | °C, e.g. `50.4` |
+| CPU temp availability | `watchdesk/{name}/cpu/temperature/availability` | `online` / `offline` |
 | HA Discovery | `homeassistant/{binary_sensor,sensor}/watchdesk_{name}_*/config` | JSON (retained) |
 
 ## Installation
@@ -118,12 +119,17 @@ Configured under `[metrics]` in `config.toml` (all optional; defaults shown):
 interval_secs = 5   # how often to sample and publish
 cpu_usage = true    # global CPU usage (%)
 cpu_temp = true     # CPU temperature (°C)
+# ryzen_master_cli = '...\AMDRyzenMasterCLI.exe'   # override the CLI path
 ```
 
 - **Usage** is sampled in-process with [`sysinfo`](https://crates.io/crates/sysinfo) — no special privileges, works everywhere.
-- **Temperature** is read from a small **sensor sidecar** (`sidecar/WatchdeskSensors.cs`) that hosts [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) headless and streams the value as JSON. Windows exposes no reliable public API for CPU package temperature, so a hardware-monitoring library (which loads a kernel driver) is required.
+- **Temperature** is read by invoking AMD's **Ryzen Master SDK CLI** (`AMDRyzenMasterCLI.exe --api GetPMTableData`) and parsing its `GetCurrentTemperature` line. Windows exposes no usable public API for CPU package temperature — on Ryzen it lives in the SMU and needs a kernel driver, and ACPI thermal zones aren't populated on AMD desktop platforms.
 
-  The sidecar and the minimal LibreHardwareMonitor DLLs are **compiled and embedded into `watchdesk.exe` at build time** (via the in-box .NET Framework compiler — no .NET SDK needed) and extracted to `C:\ProgramData\WatchDesk\sensors\` on `install`. Because the driver needs elevation, temperature only produces readings under the **service** (which runs as LocalSystem); in a plain `watchdesk run` shell it reports unavailable rather than a bogus `0`. If the sidecar or driver can't read the sensor, usage keeps working and the temperature entity simply holds its last value.
+  This requires an AMD Ryzen CPU with the [Ryzen Master SDK](https://www.amd.com/en/developer/ryzen-master-monitoring-sdk.html) installed; WatchDesk **does not bundle it**, since AMD's licence forbids redistribution. Set `ryzen_master_cli` if it lives somewhere other than the default install path.
+
+  Shelling out to AMD's *signed* CLI is deliberate. Reading the sensor needs a kernel driver, and Windows 11's **Smart App Control** blocks unsigned executables outright — including anything WatchDesk compiles itself. AMD ships both the CLI and its driver signed, so nothing unsigned sits in the temperature path.
+
+  The driver needs elevation, so readings only appear under the **service** (which runs as LocalSystem); a plain `watchdesk run` shell reports unavailable. Whenever there's no reading, the temperature entity is published as **unavailable** rather than holding a stale value, and CPU usage keeps working regardless.
 
 ## Home Assistant Example
 
@@ -155,17 +161,13 @@ The `default` branch handles both `off` and `unavailable` states.
 ## Project Structure
 
 ```
-build.rs          # compiles + embeds the sensor sidecar at build time
 src/
-├── main.rs       # CLI entry point (install/uninstall/run), asset extraction
+├── main.rs       # CLI entry point (install/uninstall/run/status)
 ├── service.rs    # Windows Service integration (SCM, power events)
 ├── monitor.rs    # Monitor power state detection (Win32 API)
 ├── mqtt.rs       # MQTT client, HA auto-discovery, LWT
-├── metrics.rs    # CPU usage (sysinfo) + temperature (sidecar) collection
+├── metrics.rs    # CPU usage (sysinfo) + temperature (Ryzen Master CLI)
 └── config.rs     # TOML config parsing
-sidecar/
-└── WatchdeskSensors.cs   # headless LibreHardwareMonitor host (C#)
-vendor/lhm/       # bundled LibreHardwareMonitor DLLs (MPL-2.0)
 ```
 
 ## License

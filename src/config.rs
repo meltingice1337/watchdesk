@@ -1,6 +1,11 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// Default install location of AMD's Ryzen Master SDK CLI, which WatchDesk
+/// shells out to for CPU temperature.
+const RYZEN_MASTER_CLI: &str =
+    r"C:\Program Files\AMD\RyzenMasterSDK\AMDRyzenMasterCLI\bin-prebuilt\AMDRyzenMasterCLI.exe";
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub mqtt: MqttConfig,
@@ -54,10 +59,15 @@ pub struct MetricsConfig {
     /// Publish global CPU usage (%). Pure Rust via sysinfo; always works.
     #[serde(default = "default_true")]
     pub cpu_usage: bool,
-    /// Publish CPU temperature (°C). Read via the bundled LibreHardwareMonitor
-    /// sidecar; requires the service (LocalSystem) so its driver can load.
+    /// Publish CPU temperature (°C). Read by invoking AMD's Ryzen Master SDK
+    /// CLI, so it needs that SDK installed and an AMD Ryzen CPU. The CLI's
+    /// driver requires elevation, which the service satisfies by running as
+    /// LocalSystem.
     #[serde(default = "default_true")]
     pub cpu_temp: bool,
+    /// Override the path to `AMDRyzenMasterCLI.exe`. Leave unset to use the
+    /// SDK's default install location.
+    pub ryzen_master_cli: Option<PathBuf>,
 }
 
 impl Default for MetricsConfig {
@@ -66,6 +76,7 @@ impl Default for MetricsConfig {
             interval_secs: default_interval(),
             cpu_usage: true,
             cpu_temp: true,
+            ryzen_master_cli: None,
         }
     }
 }
@@ -103,14 +114,21 @@ impl Config {
         Self::programdata_dir().join("config.toml")
     }
 
-    /// Directory holding the sensor sidecar and its bundled DLLs.
-    pub fn programdata_sensors_dir() -> PathBuf {
-        Self::programdata_dir().join("sensors")
-    }
-
-    /// Full path to the sensor sidecar executable the service spawns.
-    pub fn sensors_exe_path() -> PathBuf {
-        Self::programdata_sensors_dir().join("watchdesk-sensors.exe")
+    /// Path to the Ryzen Master SDK CLI used for CPU temperature, or `None`
+    /// when the SDK isn't installed (temperature then stays unreported).
+    ///
+    /// An explicit override wins and is returned even if it doesn't exist, so
+    /// a typo surfaces as an error in the log rather than silently disabling
+    /// the sensor.
+    ///
+    /// WatchDesk never bundles the SDK — AMD's licence forbids redistributing
+    /// it — so this only ever points at a copy the user installed themselves.
+    pub fn ryzen_master_cli_path(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.metrics.ryzen_master_cli {
+            return Some(path.clone());
+        }
+        let default = PathBuf::from(RYZEN_MASTER_CLI);
+        default.exists().then_some(default)
     }
 }
 
