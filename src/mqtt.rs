@@ -342,10 +342,14 @@ impl MqttManager {
                         if pending_state.is_some() {
                             info!("Monitor state reverted to {current_state:?}, cancelling pending change");
                             pending_state = None;
-                            debounce.as_mut().reset(tokio::time::Instant::now() + Duration::MAX);
                         }
                     }
                 }
+                // `pending_state` is the only thing that arms or disarms this branch.
+                // Never `reset()` to a `Duration::MAX` deadline to "park" the timer:
+                // `Instant + Duration::MAX` overflows and panics (unlike `sleep()`,
+                // which saturates internally). The guard disables the branch instead,
+                // so an already-elapsed timer is simply never polled.
                 () = &mut debounce, if pending_state.is_some() => {
                     let state = pending_state.take().unwrap();
                     info!("Monitor state confirmed: {current_state:?} -> {state:?}");
@@ -357,7 +361,6 @@ impl MqttManager {
                             error!("Failed to publish state change: {e}");
                         }
                     }
-                    debounce.as_mut().reset(tokio::time::Instant::now() + Duration::MAX);
                 }
                 _ = metrics_tick.tick() => {
                     // Keep sampling so the usage delta window stays current, but only
