@@ -197,39 +197,38 @@ impl MqttManager {
         Ok(())
     }
 
-    async fn publish_cpu_usage(&self, usage: f32) -> anyhow::Result<()> {
-        self.client
-            .publish(
-                self.cpu_usage_state_topic(),
-                QoS::AtLeastOnce,
-                true,
-                format!("{usage:.1}"),
-            )
-            .await?;
+    /// Sync and non-blocking: `try_publish` drops the sample when the request
+    /// channel is full instead of awaiting. Awaiting here deadlocks the select
+    /// loop, because the only thing that drains that channel is
+    /// `event_loop.poll()` — a sibling branch that cannot run while this body is
+    /// suspended. A stale metrics sample is worthless anyway, so dropping is right.
+    fn publish_cpu_usage(&self, usage: f32) -> anyhow::Result<()> {
+        self.client.try_publish(
+            self.cpu_usage_state_topic(),
+            QoS::AtLeastOnce,
+            true,
+            format!("{usage:.1}"),
+        )?;
         Ok(())
     }
 
-    async fn publish_cpu_temp(&self, temp: f32) -> anyhow::Result<()> {
-        self.client
-            .publish(
-                self.cpu_temp_state_topic(),
-                QoS::AtLeastOnce,
-                true,
-                format!("{temp:.1}"),
-            )
-            .await?;
+    fn publish_cpu_temp(&self, temp: f32) -> anyhow::Result<()> {
+        self.client.try_publish(
+            self.cpu_temp_state_topic(),
+            QoS::AtLeastOnce,
+            true,
+            format!("{temp:.1}"),
+        )?;
         Ok(())
     }
 
-    async fn publish_cpu_temp_available(&self, available: bool) -> anyhow::Result<()> {
-        self.client
-            .publish(
-                self.cpu_temp_availability_topic(),
-                QoS::AtLeastOnce,
-                true,
-                if available { "online" } else { "offline" },
-            )
-            .await?;
+    fn publish_cpu_temp_available(&self, available: bool) -> anyhow::Result<()> {
+        self.client.try_publish(
+            self.cpu_temp_availability_topic(),
+            QoS::AtLeastOnce,
+            true,
+            if available { "online" } else { "offline" },
+        )?;
         Ok(())
     }
 
@@ -299,6 +298,11 @@ impl MqttManager {
         let mut temp_available: Option<bool> = None;
         let poll = Duration::from_secs(self.metrics.interval_secs.max(1));
         let mut metrics_tick = tokio::time::interval_at(tokio::time::Instant::now() + poll, poll);
+        // Suspend/resume leaves hours of missed deadlines behind. The default
+        // `Burst` behaviour replays every one of them back-to-back, which keeps
+        // this branch permanently ready and starves `event_loop.poll()`. We only
+        // ever want the *current* reading, so collapse the backlog into one tick.
+        metrics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -369,7 +373,7 @@ impl MqttManager {
                     if self.metrics.cpu_usage {
                         let usage = cpu_usage.sample();
                         if connected {
-                            if let Err(e) = self.publish_cpu_usage(usage).await {
+                            if let Err(e) = self.publish_cpu_usage(usage) {
                                 error!("Failed to publish CPU usage: {e}");
                             }
                         }
@@ -383,14 +387,14 @@ impl MqttManager {
                     if connected && self.metrics.cpu_temp {
                         let value = latest_temp.as_ref().and_then(|t| *t.lock().unwrap());
                         if let Some(t) = value {
-                            if let Err(e) = self.publish_cpu_temp(t).await {
+                            if let Err(e) = self.publish_cpu_temp(t) {
                                 error!("Failed to publish CPU temp: {e}");
                             }
                         }
                         // Only on change; the topic is retained.
                         let available = value.is_some();
                         if temp_available != Some(available) {
-                            match self.publish_cpu_temp_available(available).await {
+                            match self.publish_cpu_temp_available(available) {
                                 Ok(()) => {
                                     info!(
                                         "CPU temperature sensor is now {}",
