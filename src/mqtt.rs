@@ -90,9 +90,14 @@ impl MqttManager {
             "state_topic": self.state_topic(),
             "payload_on": "ON",
             "payload_off": "OFF",
-            "availability_topic": self.availability_topic(),
-            "payload_available": "online",
-            "payload_not_available": "offline",
+            // Deliberately NOT tied to the availability topic. The retained
+            // state already says what the monitor is doing, and an unreachable
+            // PC means the monitor is off — so "unavailable" adds nothing here
+            // and actively hurts: it turns every sleep into an
+            // off -> unavailable -> off -> on burst in Home Assistant, which
+            // races automations instead of giving them one clean transition.
+            // The CPU sensors still use the availability topic, so a dead
+            // service shows them as Unavailable rather than stale.
             "unique_id": format!("watchdesk_{slug}_power"),
             "device": self.device_json()
         });
@@ -417,6 +422,13 @@ impl MqttManager {
                     // there's nothing to send.
                     if connected {
                         let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                            // The monitor sensor has no availability topic, so
+                            // leave it holding a truthful retained value: a PC
+                            // that is shutting down is a monitor that is off.
+                            let _ = self
+                                .client
+                                .publish(self.state_topic(), QoS::AtLeastOnce, true, "OFF")
+                                .await;
                             let _ = self
                                 .client
                                 .publish(self.availability_topic(), QoS::AtLeastOnce, true, "offline")
