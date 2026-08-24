@@ -112,7 +112,13 @@ struct SystemTimeOfDayInformationData {
 }
 
 fn turn_bluetooth_off() -> anyhow::Result<()> {
-    let winrt = WinRtApartment::init()?;
+    // Bound for the whole function and never dropped early: every WinRT object
+    // below is a COM proxy that must be released *before* the apartment is torn
+    // down. Rust's reverse-declaration drop order gives us exactly that, so
+    // declaring the apartment first is what makes the ordering correct. An
+    // explicit `drop()` here would call RoUninitialize() while `radios` is still
+    // alive, and releasing it afterwards access-violates (0xc0000005).
+    let _winrt = WinRtApartment::init()?;
 
     let access = Radio::RequestAccessAsync()?.join()?;
     info!("Bluetooth radio access status: {access:?}");
@@ -152,7 +158,6 @@ fn turn_bluetooth_off() -> anyhow::Result<()> {
         info!("No Bluetooth radio found among {radio_count} radio(s)");
     }
 
-    drop(winrt);
     Ok(())
 }
 
