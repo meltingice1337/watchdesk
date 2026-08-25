@@ -269,6 +269,7 @@ impl MqttManager {
         self,
         mut event_loop: rumqttc::EventLoop,
         mut monitor_rx: mpsc::UnboundedReceiver<MonitorState>,
+        mut suspend_rx: mpsc::UnboundedReceiver<()>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
         let mut current_state = MonitorState::On; // Assume on at startup
@@ -369,6 +370,26 @@ impl MqttManager {
                         if let Err(e) = self.publish_monitor_state(state).await {
                             error!("Failed to publish state change: {e}");
                         }
+                    }
+                }
+                Some(()) = suspend_rx.recv() => {
+                    // Windows suspends within a second or two of announcing it,
+                    // which is far less than the 3s debounce. Waiting would queue
+                    // the OFF into the request channel with no chance to flush it
+                    // before the NIC goes down, so HA would keep showing ON all
+                    // night. Publish it now, bypassing the debounce entirely, and
+                    // poll once to get the packet onto the wire.
+                    info!("Suspend announced: publishing monitor OFF immediately");
+                    pending_state = None;
+                    current_state = MonitorState::Off;
+                    if connected {
+                        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                            if let Err(e) = self.publish_monitor_state(MonitorState::Off).await {
+                                error!("Failed to publish OFF on suspend: {e}");
+                            }
+                            let _ = event_loop.poll().await;
+                        })
+                        .await;
                     }
                 }
                 _ = metrics_tick.tick() => {

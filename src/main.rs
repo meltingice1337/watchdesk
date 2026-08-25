@@ -577,6 +577,11 @@ fn cmd_run() -> anyhow::Result<()> {
             let _ = shutdown_tx.send(true);
         });
 
-        mqtt_manager.run(event_loop, monitor_rx, shutdown_rx).await
+        // Foreground mode receives no power broadcasts, so nothing ever signals
+        // suspend here; the branch simply stays disabled.
+        let (_suspend_tx, suspend_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        mqtt_manager
+            .run(event_loop, monitor_rx, suspend_rx, shutdown_rx)
+            .await
     })
 }

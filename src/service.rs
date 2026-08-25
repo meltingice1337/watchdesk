@@ -59,6 +59,7 @@ fn init_file_logger() -> anyhow::Result<()> {
 
 fn run_service() -> anyhow::Result<()> {
     let (monitor_tx, monitor_rx) = mpsc::unbounded_channel::<MonitorState>();
+    let (suspend_tx, suspend_rx) = mpsc::unbounded_channel::<()>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Register service control handler FIRST so SCM knows we're alive
@@ -74,6 +75,9 @@ fn run_service() -> anyhow::Result<()> {
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 ServiceControl::PowerEvent(param) => {
                     info!("PowerEvent received: {param:?}");
+                    if matches!(param, PowerEventParam::Suspend) {
+                        let _ = suspend_tx.send(());
+                    }
                     if let PowerEventParam::PowerSettingChange(setting) = param {
                         let state = match setting {
                             PowerBroadcastSetting::MonitorPowerOn(s) => {
@@ -153,7 +157,9 @@ fn run_service() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async {
         let (mqtt_manager, event_loop) = MqttManager::new(&config)?;
-        mqtt_manager.run(event_loop, monitor_rx, shutdown_rx).await
+        mqtt_manager
+            .run(event_loop, monitor_rx, suspend_rx, shutdown_rx)
+            .await
     });
 
     if let Err(e) = &result {
